@@ -1,3 +1,4 @@
+mod init;
 mod input;
 mod render;
 
@@ -20,6 +21,7 @@ use commands::{
     render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
+use init::initialize_repo;
 use render::{Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
@@ -74,6 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .run_turn_with_output(&prompt, output_format)?,
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
+        CliAction::Init => run_init()?,
         CliAction::Repl {
             model,
             allowed_tools,
@@ -106,6 +109,7 @@ enum CliAction {
     },
     Login,
     Logout,
+    Init,
     Repl {
         model: String,
         allowed_tools: Option<AllowedToolSet>,
@@ -230,6 +234,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "system-prompt" => parse_system_prompt_args(&rest[1..]),
         "login" => Ok(CliAction::Login),
         "logout" => Ok(CliAction::Logout),
+        "init" => Ok(CliAction::Init),
         "prompt" => {
             let prompt = rest[1..].join(" ");
             if prompt.trim().is_empty() {
@@ -703,26 +708,6 @@ fn format_resume_report(session_path: &str, message_count: usize, turns: u32) ->
     )
 }
 
-fn format_init_report(path: &Path, created: bool) -> String {
-    if created {
-        format!(
-            "Init
-  CLAUDE.md        {}
-  Result           created
-  Next step        Review and tailor the generated guidance",
-            path.display()
-        )
-    } else {
-        format!(
-            "Init
-  CLAUDE.md        {}
-  Result           skipped (already exists)
-  Next step        Edit the existing file intentionally if workflows changed",
-            path.display()
-        )
-    }
-}
-
 fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
     if skipped {
         format!(
@@ -1112,7 +1097,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Init => {
-                Self::run_init()?;
+                run_init()?;
                 false
             }
             SlashCommand::Diff => {
@@ -1317,11 +1302,6 @@ impl LiveCli {
 
     fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", render_memory_report()?);
-        Ok(())
-    }
-
-    fn run_init() -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", init_claude_md()?);
         Ok(())
     }
 
@@ -1722,67 +1702,12 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
 
 fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let claude_md = cwd.join("CLAUDE.md");
-    if claude_md.exists() {
-        return Ok(format_init_report(&claude_md, false));
-    }
-
-    let content = render_init_claude_md(&cwd);
-    fs::write(&claude_md, content)?;
-    Ok(format_init_report(&claude_md, true))
+    Ok(initialize_repo(&cwd)?.render())
 }
 
-fn render_init_claude_md(cwd: &Path) -> String {
-    let mut lines = vec![
-        "# CLAUDE.md".to_string(),
-        String::new(),
-        "This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.".to_string(),
-        String::new(),
-    ];
-
-    let mut command_lines = Vec::new();
-    if cwd.join("rust").join("Cargo.toml").is_file() {
-        command_lines.push("- Run Rust verification from `rust/`: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`".to_string());
-    } else if cwd.join("Cargo.toml").is_file() {
-        command_lines.push("- Run Rust verification from the repo root: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`".to_string());
-    }
-    if cwd.join("tests").is_dir() && cwd.join("src").is_dir() {
-        command_lines.push("- `src/` and `tests/` are also present; check those surfaces before removing or renaming Python-era compatibility assets.".to_string());
-    }
-    if !command_lines.is_empty() {
-        lines.push("## Verification".to_string());
-        lines.extend(command_lines);
-        lines.push(String::new());
-    }
-
-    let mut structure_lines = Vec::new();
-    if cwd.join("rust").is_dir() {
-        structure_lines.push(
-            "- `rust/` contains the Rust workspace and the active CLI/runtime implementation."
-                .to_string(),
-        );
-    }
-    if cwd.join("src").is_dir() {
-        structure_lines.push("- `src/` contains the older Python-first workspace artifacts referenced by the repo history and tests.".to_string());
-    }
-    if cwd.join("tests").is_dir() {
-        structure_lines.push("- `tests/` exercises compatibility and porting behavior across the repository surfaces.".to_string());
-    }
-    if !structure_lines.is_empty() {
-        lines.push("## Repository shape".to_string());
-        lines.extend(structure_lines);
-        lines.push(String::new());
-    }
-
-    lines.push("## Working agreement".to_string());
-    lines.push("- Prefer small, reviewable Rust changes and keep slash-command behavior aligned between the shared command registry and the CLI entrypoints.".to_string());
-    lines.push("- Do not overwrite existing CLAUDE.md content automatically; update it intentionally when repo workflows change.".to_string());
-    lines.push(String::new());
-
-    lines.join(
-        "
-",
-    )
+fn run_init() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", init_claude_md()?);
+    Ok(())
 }
 
 fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
@@ -2341,34 +2266,65 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
         .collect()
 }
 
-fn print_help() {
-    println!("rusty-claude-cli v{VERSION}");
-    println!();
-    println!("Usage:");
-    println!("  rusty-claude-cli [--model MODEL] [--allowedTools TOOL[,TOOL...]]");
-    println!("      Start the interactive REPL");
-    println!("  rusty-claude-cli [--model MODEL] [--output-format text|json] prompt TEXT");
-    println!("      Send one prompt and exit");
-    println!("  rusty-claude-cli [--model MODEL] [--output-format text|json] TEXT");
-    println!("      Shorthand non-interactive prompt mode");
-    println!("  rusty-claude-cli --resume SESSION.json [/status] [/compact] [...]");
-    println!("      Inspect or maintain a saved session without entering the REPL");
-    println!("  rusty-claude-cli dump-manifests");
-    println!("  rusty-claude-cli bootstrap-plan");
-    println!("  rusty-claude-cli system-prompt [--cwd PATH] [--date YYYY-MM-DD]");
-    println!("  rusty-claude-cli login");
-    println!("  rusty-claude-cli logout");
-    println!();
-    println!("Flags:");
-    println!("  --model MODEL              Override the active model");
-    println!("  --output-format FORMAT     Non-interactive output format: text or json");
-    println!("  --permission-mode MODE     Set read-only, workspace-write, or danger-full-access");
-    println!("  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)");
-    println!("  --version, -V              Print version and build information locally");
-    println!();
-    println!("Interactive slash commands:");
-    println!("{}", render_slash_command_help());
-    println!();
+fn print_help_to(out: &mut impl Write) -> io::Result<()> {
+    writeln!(out, "rusty-claude-cli v{VERSION}")?;
+    writeln!(out)?;
+    writeln!(out, "Usage:")?;
+    writeln!(
+        out,
+        "  rusty-claude-cli [--model MODEL] [--allowedTools TOOL[,TOOL...]]"
+    )?;
+    writeln!(out, "      Start the interactive REPL")?;
+    writeln!(
+        out,
+        "  rusty-claude-cli [--model MODEL] [--output-format text|json] prompt TEXT"
+    )?;
+    writeln!(out, "      Send one prompt and exit")?;
+    writeln!(
+        out,
+        "  rusty-claude-cli [--model MODEL] [--output-format text|json] TEXT"
+    )?;
+    writeln!(out, "      Shorthand non-interactive prompt mode")?;
+    writeln!(
+        out,
+        "  rusty-claude-cli --resume SESSION.json [/status] [/compact] [...]"
+    )?;
+    writeln!(
+        out,
+        "      Inspect or maintain a saved session without entering the REPL"
+    )?;
+    writeln!(out, "  rusty-claude-cli dump-manifests")?;
+    writeln!(out, "  rusty-claude-cli bootstrap-plan")?;
+    writeln!(
+        out,
+        "  rusty-claude-cli system-prompt [--cwd PATH] [--date YYYY-MM-DD]"
+    )?;
+    writeln!(out, "  rusty-claude-cli login")?;
+    writeln!(out, "  rusty-claude-cli logout")?;
+    writeln!(out, "  rusty-claude-cli init")?;
+    writeln!(out)?;
+    writeln!(out, "Flags:")?;
+    writeln!(
+        out,
+        "  --model MODEL              Override the active model"
+    )?;
+    writeln!(
+        out,
+        "  --output-format FORMAT     Non-interactive output format: text or json"
+    )?;
+    writeln!(
+        out,
+        "  --permission-mode MODE     Set read-only, workspace-write, or danger-full-access"
+    )?;
+    writeln!(out, "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)")?;
+    writeln!(
+        out,
+        "  --version, -V              Print version and build information locally"
+    )?;
+    writeln!(out)?;
+    writeln!(out, "Interactive slash commands:")?;
+    writeln!(out, "{}", render_slash_command_help())?;
+    writeln!(out)?;
     let resume_commands = resume_supported_slash_commands()
         .into_iter()
         .map(|spec| match spec.argument_hint {
@@ -2377,28 +2333,46 @@ fn print_help() {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    println!("Resume-safe commands: {resume_commands}");
-    println!("Examples:");
-    println!("  rusty-claude-cli --model claude-opus \"summarize this repo\"");
-    println!("  rusty-claude-cli --output-format json prompt \"explain src/main.rs\"");
-    println!("  rusty-claude-cli --allowedTools read,glob \"summarize Cargo.toml\"");
-    println!("  rusty-claude-cli --resume session.json /status /diff /export notes.txt");
-    println!("  rusty-claude-cli login");
+    writeln!(out, "Resume-safe commands: {resume_commands}")?;
+    writeln!(out, "Examples:")?;
+    writeln!(
+        out,
+        "  rusty-claude-cli --model claude-opus \"summarize this repo\""
+    )?;
+    writeln!(
+        out,
+        "  rusty-claude-cli --output-format json prompt \"explain src/main.rs\""
+    )?;
+    writeln!(
+        out,
+        "  rusty-claude-cli --allowedTools read,glob \"summarize Cargo.toml\""
+    )?;
+    writeln!(
+        out,
+        "  rusty-claude-cli --resume session.json /status /diff /export notes.txt"
+    )?;
+    writeln!(out, "  rusty-claude-cli login")?;
+    writeln!(out, "  rusty-claude-cli init")?;
+    Ok(())
+}
+
+fn print_help() {
+    let _ = print_help_to(&mut io::stdout());
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_tool_specs, format_compact_report, format_cost_report, format_init_report,
-        format_model_report, format_model_switch_report, format_permissions_report,
-        format_permissions_switch_report, format_resume_report, format_status_report,
-        format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
-        parse_git_status_metadata, render_config_report, render_init_claude_md,
-        render_memory_report, render_repl_help, resume_supported_slash_commands, status_context,
-        CliAction, CliOutputFormat, SlashCommand, StatusUsage, DEFAULT_MODEL,
+        filter_tool_specs, format_compact_report, format_cost_report, format_model_report,
+        format_model_switch_report, format_permissions_report, format_permissions_switch_report,
+        format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
+        normalize_permission_mode, parse_args, parse_git_status_metadata, print_help_to,
+        render_config_report, render_memory_report, render_repl_help,
+        resume_supported_slash_commands, status_context, CliAction, CliOutputFormat, SlashCommand,
+        StatusUsage, DEFAULT_MODEL,
     };
     use runtime::{ContentBlock, ConversationMessage, MessageRole, PermissionMode};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     #[test]
     fn defaults_to_repl_when_no_args() {
@@ -2533,6 +2507,10 @@ mod tests {
         assert_eq!(
             parse_args(&["logout".to_string()]).expect("logout should parse"),
             CliAction::Logout
+        );
+        assert_eq!(
+            parse_args(&["init".to_string()]).expect("init should parse"),
+            CliAction::Init
         );
     }
 
@@ -2688,12 +2666,11 @@ mod tests {
     }
 
     #[test]
-    fn init_report_uses_structured_output() {
-        let created = format_init_report(Path::new("/tmp/CLAUDE.md"), true);
-        assert!(created.contains("Init"));
-        assert!(created.contains("Result           created"));
-        let skipped = format_init_report(Path::new("/tmp/CLAUDE.md"), false);
-        assert!(skipped.contains("skipped (already exists)"));
+    fn init_help_mentions_direct_subcommand() {
+        let mut help = Vec::new();
+        print_help_to(&mut help).expect("help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+        assert!(help.contains("rusty-claude-cli init"));
     }
 
     #[test]
@@ -2797,7 +2774,7 @@ mod tests {
     fn status_context_reads_real_workspace_metadata() {
         let context = status_context(None).expect("status context should load");
         assert!(context.cwd.is_absolute());
-        assert_eq!(context.discovered_config_files, 3);
+        assert_eq!(context.discovered_config_files, 5);
         assert!(context.loaded_config_files <= context.discovered_config_files);
     }
 
@@ -2855,7 +2832,7 @@ mod tests {
 
     #[test]
     fn init_template_mentions_detected_rust_workspace() {
-        let rendered = render_init_claude_md(Path::new("."));
+        let rendered = crate::init::render_init_claude_md(std::path::Path::new("."));
         assert!(rendered.contains("# CLAUDE.md"));
         assert!(rendered.contains("cargo clippy --workspace --all-targets -- -D warnings"));
     }
